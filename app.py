@@ -4,654 +4,580 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
-import gspread
-from google.oauth2.service_account import Credentials
+from io import StringIO
+import requests
 
 # Configuração da página
 st.set_page_config(
     page_title="Calculadora Pipeline CAX",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# CSS customizado
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-left: 4px solid #667eea;
-    }
-    
-    .stage-sal { border-left-color: #3b82f6; }
-    .stage-sql { border-left-color: #f59e0b; }
-    .stage-opp { border-left-color: #ef4444; }
-    .stage-bc { border-left-color: #10b981; }
-    .stage-onb { border-left-color: #8b5cf6; }
-</style>
-""", unsafe_allow_html=True)
+# Configurações globais
+GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1L0nO-rchxshEufLANyH3aEz6hFulvpq1OMPUzTw76LM/export?format=csv&gid=0"
+ETAPAS_FUNIL = ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND', 'ONB']
 
-# Função para conectar com Google Sheets
 @st.cache_data(ttl=300)  # Cache por 5 minutos
 def load_data():
     """Carrega dados do Google Sheets"""
     try:
-        # Configuração da conexão
-        SPREADSHEET_ID = "1L0nO-rchxshEufLANyH3aEz6hFulvpq1OMPUzTw76LM"
-        SHEET_NAME = "Pipeline"
+        response = requests.get(GOOGLE_SHEETS_URL)
+        response.raise_for_status()
         
-        # Criar URL para CSV do Google Sheets
-        csv_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
+        # Lê o CSV
+        df = pd.read_csv(StringIO(response.text))
         
-        # Carregar dados
-        df = pd.read_csv(csv_url)
+        # Limpeza básica dos dados
+        df.columns = df.columns.str.strip()
         
-        # Limpar e processar dados
-        df = df.dropna(subset=['id'])  # Remove linhas vazias
-        df['data_entrada'] = pd.to_datetime(df['data_entrada'], errors='coerce')
-        df['data_prevista_onboarding'] = pd.to_datetime(df['data_prevista_onboarding'], errors='coerce')
+        # Converte datas
+        date_columns = ['data_entrada', 'data_prevista_onboarding']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        # Remove linhas vazias
+        df = df.dropna(subset=['dealname'])
         
         return df
-        
     except Exception as e:
-        st.error(f"Erro ao carregar dados: {str(e)}")
+        st.error(f"Erro ao carregar dados: {e}")
         return pd.DataFrame()
 
-# Função para calcular métricas do pipeline
-def calculate_metrics(df):
-    """Calcula métricas do pipeline"""
-    if df.empty:
-        return {}
-    
-    today = datetime.now().date()
-    
-    # Contagem por etapa
-    stage_counts = df['etapa'].value_counts().to_dict()
-    
-    # Deals para hoje
-    deals_hoje = 0
-    if 'data_prevista_onboarding' in df.columns:
-        deals_hoje = len(df[df['data_prevista_onboarding'].dt.date == today])
-    
-    # Calcular dias na etapa (só valores positivos)
-    df['dias_na_etapa'] = (datetime.now() - df['data_entrada']).dt.days
-    df['dias_na_etapa'] = df['dias_na_etapa'].clip(lower=0)  # Remover valores negativos
-    
-    # Deals atrasados (mais de 7 dias na etapa)
-    deals_atrasados = len(df[df['dias_na_etapa'] > 7])
-    
-    return {
-        'total_deals': len(df),
-        'stage_counts': stage_counts,
-        'deals_hoje': deals_hoje,
-        'deals_atrasados': deals_atrasados,
-        'dias_na_etapa': df['dias_na_etapa']
-    }
+def is_business_day(date):
+    """Verifica se é dia útil (Segunda a Sexta)"""
+    return date.weekday() < 5
 
-# Função para criar gráfico do funil
-def create_funnel_chart(stage_counts):
-    """Cria gráfico de funil das etapas"""
-    stages = ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND']
-    colors = ['#3b82f6', '#f59e0b', '#ef4444', '#10b981', '#8b5cf6']
-    
-    values = [stage_counts.get(stage, 0) for stage in stages]
-    
-    fig = go.Figure(go.Funnel(
-        y=stages,
-        x=values,
-        textinfo="value+percent initial",
-        marker={
-            'color': colors,
-            'line': {'width': 2, 'color': 'white'}
-        }
-    ))
-    
-    fig.update_layout(
-        title="🎯 Funil de Vendas por Etapa",
-        height=400,
-        showlegend=False
-    )
-    
-    return fig
-
-# Função para criar gráfico de timeline
-def create_timeline_chart(df):
-    """Cria gráfico de timeline dos deals"""
-    if df.empty:
-        return None
-    
-    # Garantir que dias_na_etapa seja positivo
-    df_clean = df.copy()
-    df_clean['dias_na_etapa'] = df_clean['dias_na_etapa'].clip(lower=1)  # Mínimo 1 dia
-    
-    fig = px.scatter(
-        df_clean, 
-        x='data_entrada', 
-        y='etapa',
-        color='bdr',
-        size='dias_na_etapa',
-        hover_data=['dealname', 'dias_na_etapa'],
-        title="📅 Timeline dos Deals por Etapa"
-    )
-    
-    fig.update_layout(height=400)
-    return fig
-
-# Funções da Calculadora Pipeline
-def get_business_days(start_date, num_days):
-    """Retorna data após N dias úteis"""
-    current = start_date
+def add_business_days(start_date, business_days):
+    """Adiciona dias úteis a uma data"""
+    current_date = start_date
     days_added = 0
     
-    while days_added < num_days:
-        current += timedelta(days=1)
-        if current.weekday() < 5:  # Segunda a sexta
+    while days_added < business_days:
+        current_date += timedelta(days=1)
+        if is_business_day(current_date):
             days_added += 1
     
-    return current
+    return current_date
 
 def get_next_business_days(num_days=15):
-    """Retorna próximos N dias úteis"""
+    """Retorna próximos dias úteis"""
     business_days = []
-    current = datetime.now().date()
+    current_date = datetime.now().date()
     
     while len(business_days) < num_days:
-        current += timedelta(days=1)
-        if current.weekday() < 5:
-            business_days.append(current)
+        current_date += timedelta(days=1)
+        if is_business_day(current_date):
+            business_days.append(current_date)
     
     return business_days
 
-def calculate_pipeline_forecast(df, config):
-    """Calcula previsão do pipeline para próximos dias"""
+def calculate_conversion_prediction(df, config, test_scenarios=None):
+    """Calcula previsão de conversões"""
     if df.empty:
-        return []
+        return pd.DataFrame()
     
-    business_days = get_next_business_days(15)
+    # Configurações padrão
+    lead_times = config.get('lead_times', {
+        'SAL': 2, 'SQL': 3, 'OPP': 5, 'BC': 7, 'ONB_AGEND': 2, 'ONB': 0
+    })
+    conversion_rates = config.get('conversion_rates', {
+        'SAL': 0.6, 'SQL': 0.7, 'OPP': 0.8, 'BC': 0.9, 'ONB_AGEND': 0.95, 'ONB': 1.0
+    })
+    
+    # Próximos dias úteis
+    next_days = get_next_business_days(15)
     results = []
     
-    for target_date in business_days:
-        daily_result = {
-            'date': pd.Timestamp(target_date),
-            'SAL': 0, 'SQL': 0, 'OPP': 0, 'BC': 0, 'ONB': 0
-        }
+    # Deals existentes
+    for _, deal in df.iterrows():
+        if deal['etapa'] not in ETAPAS_FUNIL or deal['etapa'] == 'ONB':
+            continue
         
-        for _, deal in df.iterrows():
-            entry_date = deal['data_entrada'].date() if pd.notna(deal['data_entrada']) else datetime.now().date()
-            current_stage = deal['etapa']
-            
-            # Calcular quando cada deal deve converter em cada etapa
-            if current_stage == 'SAL':
-                sql_date = get_business_days(entry_date, config['SAL']['days'])
-                opp_date = get_business_days(sql_date, config['SQL']['days']) 
-                bc_date = get_business_days(opp_date, config['OPP']['days'])
-                onb_date = get_business_days(bc_date, config['BC']['days'])
-                
-                if target_date <= sql_date:
-                    daily_result['SAL'] += 1
-                elif target_date <= opp_date:
-                    daily_result['SQL'] += config['SAL']['cvr'] / 100
-                elif target_date <= bc_date:
-                    daily_result['OPP'] += (config['SAL']['cvr'] / 100) * (config['SQL']['cvr'] / 100)
-                elif target_date <= onb_date:
-                    daily_result['BC'] += (config['SAL']['cvr'] / 100) * (config['SQL']['cvr'] / 100) * (config['OPP']['cvr'] / 100)
-                else:
-                    daily_result['ONB'] += (config['SAL']['cvr'] / 100) * (config['SQL']['cvr'] / 100) * (config['OPP']['cvr'] / 100) * (config['BC']['cvr'] / 100)
-            
-            elif current_stage == 'SQL':
-                opp_date = get_business_days(entry_date, config['SQL']['days'])
-                bc_date = get_business_days(opp_date, config['OPP']['days'])
-                onb_date = get_business_days(bc_date, config['BC']['days'])
-                
-                if target_date <= opp_date:
-                    daily_result['SQL'] += 1
-                elif target_date <= bc_date:
-                    daily_result['OPP'] += config['SQL']['cvr'] / 100
-                elif target_date <= onb_date:
-                    daily_result['BC'] += (config['SQL']['cvr'] / 100) * (config['OPP']['cvr'] / 100)
-                else:
-                    daily_result['ONB'] += (config['SQL']['cvr'] / 100) * (config['OPP']['cvr'] / 100) * (config['BC']['cvr'] / 100)
-            
-            elif current_stage == 'OPP':
-                bc_date = get_business_days(entry_date, config['OPP']['days'])
-                onb_date = get_business_days(bc_date, config['BC']['days'])
-                
-                if target_date <= bc_date:
-                    daily_result['OPP'] += 1
-                elif target_date <= onb_date:
-                    daily_result['BC'] += config['OPP']['cvr'] / 100
-                else:
-                    daily_result['ONB'] += (config['OPP']['cvr'] / 100) * (config['BC']['cvr'] / 100)
-            
-            elif current_stage == 'BC':
-                onb_date = get_business_days(entry_date, config['BC']['days'])
-                
-                if target_date <= onb_date:
-                    daily_result['BC'] += 1
-                else:
-                    daily_result['ONB'] += config['BC']['cvr'] / 100
-            
-            elif current_stage == 'ONB_AGEND':
-                # Se tem data prevista, usar ela, senão usar data entrada + lead time
-                if pd.notna(deal['data_prevista_onboarding']):
-                    onb_date = deal['data_prevista_onboarding'].date()
-                else:
-                    onb_date = get_business_days(entry_date, 2)  # Default 2 dias
-                
-                if target_date >= onb_date:
-                    daily_result['ONB'] += 1
+        # Data atual para cálculo
+        base_date = datetime.now().date()
+        if pd.notna(deal.get('data_entrada')):
+            base_date = max(base_date, deal['data_entrada'].date())
         
-        # Arredondar valores
-        for key in ['SAL', 'SQL', 'OPP', 'BC', 'ONB']:
-            daily_result[key] = round(daily_result[key], 1)
+        # Calcula conversão por etapa
+        current_stage_idx = ETAPAS_FUNIL.index(deal['etapa'])
+        probability = 1.0
         
-        results.append(daily_result)
+        for stage_idx in range(current_stage_idx, len(ETAPAS_FUNIL)):
+            stage = ETAPAS_FUNIL[stage_idx]
+            if stage == 'ONB':
+                break
+                
+            probability *= conversion_rates.get(stage, 0.5)
+            lead_time = sum([lead_times.get(ETAPAS_FUNIL[i], 2) for i in range(current_stage_idx, stage_idx + 1)])
+            
+            conversion_date = add_business_days(base_date, lead_time)
+            
+            if conversion_date in next_days:
+                results.append({
+                    'data': conversion_date,
+                    'deal': deal['dealname'],
+                    'etapa_origem': deal['etapa'],
+                    'etapa_destino': 'ONB',
+                    'probabilidade': probability,
+                    'bdr': deal.get('bdr', 'N/A'),
+                    'tipo': 'Existente'
+                })
     
-    return results
+    # Cenários de teste
+    if test_scenarios:
+        for scenario in test_scenarios:
+            stage = scenario.get('etapa', 'SAL')
+            quantity = scenario.get('quantidade', 1)
+            target_date = scenario.get('data_entrada', datetime.now().date())
+            
+            if stage not in ETAPAS_FUNIL or stage == 'ONB':
+                continue
+            
+            current_stage_idx = ETAPAS_FUNIL.index(stage)
+            probability = 1.0
+            
+            for stage_idx in range(current_stage_idx, len(ETAPAS_FUNIL)):
+                current_stage = ETAPAS_FUNIL[stage_idx]
+                if current_stage == 'ONB':
+                    break
+                    
+                probability *= conversion_rates.get(current_stage, 0.5)
+                lead_time = sum([lead_times.get(ETAPAS_FUNIL[i], 2) for i in range(current_stage_idx, stage_idx + 1)])
+                
+                conversion_date = add_business_days(target_date, lead_time)
+                
+                if conversion_date in next_days:
+                    for i in range(quantity):
+                        results.append({
+                            'data': conversion_date,
+                            'deal': f"Cenário {scenario.get('nome', 'Teste')} #{i+1}",
+                            'etapa_origem': stage,
+                            'etapa_destino': 'ONB',
+                            'probabilidade': probability,
+                            'bdr': scenario.get('bdr', 'Teste'),
+                            'tipo': 'Cenário'
+                        })
+    
+    if not results:
+        return pd.DataFrame()
+    
+    # Cria DataFrame dos resultados
+    prediction_df = pd.DataFrame(results)
+    
+    # Agrupa por data
+    summary = prediction_df.groupby('data').agg({
+        'probabilidade': 'sum',
+        'deal': 'count'
+    }).round(2)
+    
+    summary.columns = ['Conversões Previstas', 'Total Deals']
+    summary['Data'] = summary.index
+    summary['Dia Semana'] = summary['Data'].apply(lambda x: x.strftime('%A'))
+    summary['É Quarta'] = summary['Data'].apply(lambda x: x.weekday() == 2)
+    
+    # Reordena colunas
+    summary = summary[['Data', 'Dia Semana', 'É Quarta', 'Conversões Previstas', 'Total Deals']].reset_index(drop=True)
+    
+    return summary
 
-def create_pipeline_evolution_chart(df_pipeline):
-    """Cria gráfico de evolução do pipeline"""
+def safe_display_dataframe(df, title="", height=400):
+    """Exibe DataFrame de forma segura sem formatação problemática"""
+    if title:
+        st.subheader(title)
+    
+    if df.empty:
+        st.info("📭 Nenhum dado disponível")
+        return
+    
+    try:
+        # Destaca quartas-feiras de forma simples
+        if 'É Quarta' in df.columns:
+            # Cria uma cópia para exibição
+            display_df = df.copy()
+            
+            # Adiciona emoji para quartas-feiras
+            display_df.loc[display_df['É Quarta'] == True, 'Dia Semana'] = '🎯 ' + display_df.loc[display_df['É Quarta'] == True, 'Dia Semana']
+            
+            # Remove coluna booleana
+            display_df = display_df.drop('É Quarta', axis=1)
+            
+            st.dataframe(display_df, use_container_width=True, height=height)
+        else:
+            st.dataframe(df, use_container_width=True, height=height)
+            
+    except Exception as e:
+        st.warning(f"⚠️ Problema na formatação: {str(e)[:100]}")
+        st.dataframe(df, use_container_width=True, height=height)
+
+def create_conversion_chart(df):
+    """Cria gráfico de conversões previstas"""
+    if df.empty:
+        return None
+    
     fig = go.Figure()
     
-    colors = {
-        'SAL': '#3b82f6',
-        'SQL': '#f59e0b', 
-        'OPP': '#ef4444',
-        'BC': '#10b981',
-        'ONB': '#8b5cf6'
-    }
+    # Barras normais
+    normal_days = df[df['É Quarta'] == False]
+    if not normal_days.empty:
+        fig.add_trace(go.Bar(
+            x=normal_days['Data'],
+            y=normal_days['Conversões Previstas'],
+            name='Dias Normais',
+            marker_color='#1f77b4',
+            hovertemplate='<b>%{x}</b><br>Conversões: %{y:.1f}<extra></extra>'
+        ))
     
-    for stage in ['SAL', 'SQL', 'OPP', 'BC', 'ONB']:
-        fig.add_trace(go.Scatter(
-            x=df_pipeline['date'],
-            y=df_pipeline[stage],
-            mode='lines+markers',
-            name=stage,
-            line=dict(color=colors[stage], width=3),
-            marker=dict(size=6)
+    # Barras para quartas-feiras
+    wednesdays = df[df['É Quarta'] == True]
+    if not wednesdays.empty:
+        fig.add_trace(go.Bar(
+            x=wednesdays['Data'],
+            y=wednesdays['Conversões Previstas'],
+            name='🎯 Quartas-feiras (ONB)',
+            marker_color='#ff7f0e',
+            hovertemplate='<b>%{x} (Quarta-feira)</b><br>Conversões: %{y:.1f}<extra></extra>'
         ))
     
     fig.update_layout(
-        title="📈 Evolução do Pipeline - Próximos 15 dias",
-        xaxis_title="Data",
-        yaxis_title="Número de Deals",
-        height=500,
-        hovermode='x unified'
+        title='📈 Previsão de Conversões por Dia',
+        xaxis_title='Data',
+        yaxis_title='Conversões Previstas',
+        hovermode='x unified',
+        showlegend=True
     )
     
     return fig
 
-def get_next_wednesday_deals(df_pipeline):
-    """Retorna deals para próxima quarta-feira"""
+def get_deals_late(df):
+    """Identifica deals atrasados"""
+    if df.empty:
+        return pd.DataFrame()
+    
     today = datetime.now().date()
     
-    # Encontrar próxima quarta-feira
-    days_until_wednesday = (2 - today.weekday()) % 7
-    if days_until_wednesday == 0:  # Se hoje é quarta
-        days_until_wednesday = 7
+    # Deals com data prevista passada
+    late_deals = df[
+        (pd.notna(df['data_prevista_onboarding'])) &
+        (df['data_prevista_onboarding'].dt.date < today) &
+        (df['etapa'] != 'ONB')
+    ].copy()
     
-    next_wednesday = today + timedelta(days=days_until_wednesday)
+    if late_deals.empty:
+        return pd.DataFrame()
     
-    # Encontrar na tabela
-    wednesday_row = df_pipeline[df_pipeline['date'].dt.date == next_wednesday]
+    # Calcula dias de atraso
+    late_deals['dias_atraso'] = (today - late_deals['data_prevista_onboarding'].dt.date).dt.days
     
-    if not wednesday_row.empty:
-        return wednesday_row.iloc[0]['ONB']
+    # Classifica urgência
+    def classify_urgency(days):
+        if days >= 7:
+            return '🔴 Crítico'
+        elif days >= 3:
+            return '🟡 Atenção'
+        else:
+            return '🟢 Baixo'
     
-    return 0
+    late_deals['urgencia'] = late_deals['dias_atraso'].apply(classify_urgency)
+    
+    # Seleciona e ordena colunas
+    result = late_deals[[
+        'dealname', 'etapa', 'data_prevista_onboarding', 
+        'dias_atraso', 'urgencia', 'bdr'
+    ]].sort_values('dias_atraso', ascending=False)
+    
+    result.columns = ['Deal', 'Etapa', 'Data Prevista', 'Dias Atraso', 'Urgência', 'BDR']
+    
+    return result
 
-def calculate_scenario_impact(new_sal, new_sql, new_opp, config):
-    """Calcula impacto de um cenário de novos deals"""
-    
-    # Calcular conversões em cascata
-    sal_to_onb = new_sal * (config['SAL']['cvr']/100) * (config['SQL']['cvr']/100) * (config['OPP']['cvr']/100) * (config['BC']['cvr']/100)
-    sql_to_onb = new_sql * (config['SQL']['cvr']/100) * (config['OPP']['cvr']/100) * (config['BC']['cvr']/100)
-    opp_to_onb = new_opp * (config['OPP']['cvr']/100) * (config['BC']['cvr']/100)
-    
-    total_onbs = sal_to_onb + sql_to_onb + opp_to_onb
-    
-    # Calcular quando primeira conversão acontece
-    min_days = float('inf')
-    if new_sal > 0:
-        sal_days = config['SAL']['days'] + config['SQL']['days'] + config['OPP']['days'] + config['BC']['days']
-        min_days = min(min_days, sal_days)
-    if new_sql > 0:
-        sql_days = config['SQL']['days'] + config['OPP']['days'] + config['BC']['days']
-        min_days = min(min_days, sql_days)
-    if new_opp > 0:
-        opp_days = config['OPP']['days'] + config['BC']['days']
-        min_days = min(min_days, opp_days)
-    
-    first_conversion_days = min_days if min_days != float('inf') else 0
-    
-    # Estimativa de receita (R$ 50.000 por ONB)
-    estimated_revenue = total_onbs * 50000
-    
-    return {
-        'additional_onbs': total_onbs,
-        'first_conversion_days': first_conversion_days,
-        'estimated_revenue': estimated_revenue
-    }
-
-# INTERFACE PRINCIPAL
 def main():
-    # Header
-    st.markdown("""
-    <div class="main-header">
-        <h1>📊 Calculadora Pipeline CAX</h1>
-        <p>Dashboard em tempo real conectado com Google Sheets</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Título
+    st.title("📊 Calculadora Pipeline CAX")
+    st.markdown("*Dashboard e previsões de conversão em tempo real*")
     
-    # Carregar dados
-    with st.spinner("🔄 Carregando dados da planilha..."):
+    # Sidebar - Configurações
+    with st.sidebar:
+        st.header("⚙️ Configurações")
+        
+        # Atualização automática
+        auto_refresh = st.checkbox("🔄 Auto-atualização (5min)", value=True)
+        if auto_refresh:
+            st.rerun()
+        
+        st.divider()
+        
+        # Configurações de conversão
+        st.subheader("📈 Taxas de Conversão")
+        conversion_rates = {}
+        for etapa in ETAPAS_FUNIL[:-1]:  # Exclui ONB
+            conversion_rates[etapa] = st.slider(
+                f"{etapa}", 0.0, 1.0, 
+                value={'SAL': 0.6, 'SQL': 0.7, 'OPP': 0.8, 'BC': 0.9, 'ONB_AGEND': 0.95}.get(etapa, 0.5),
+                step=0.05,
+                key=f"conv_{etapa}"
+            )
+        
+        st.divider()
+        
+        # Lead times
+        st.subheader("⏱️ Lead Times (dias úteis)")
+        lead_times = {}
+        for etapa in ETAPAS_FUNIL[:-1]:  # Exclui ONB
+            lead_times[etapa] = st.number_input(
+                f"{etapa}", min_value=0, max_value=30,
+                value={'SAL': 2, 'SQL': 3, 'OPP': 5, 'BC': 7, 'ONB_AGEND': 2}.get(etapa, 2),
+                key=f"lead_{etapa}"
+            )
+    
+    # Carrega dados
+    with st.spinner("📥 Carregando dados..."):
         df = load_data()
     
     if df.empty:
-        st.error("❌ Não foi possível carregar os dados. Verifique a planilha.")
-        st.info("💡 Certifique-se que a planilha está com permissão 'Qualquer pessoa com o link pode visualizar'")
+        st.error("❌ Não foi possível carregar os dados do Google Sheets")
         return
     
-    # Sidebar - Filtros
-    st.sidebar.header("🎯 Filtros")
+    # Métricas principais
+    col1, col2, col3, col4 = st.columns(4)
     
-    # Filtro por BDR
-    bdrs = ['Todos'] + sorted(df['bdr'].dropna().unique().tolist())
-    selected_bdr = st.sidebar.selectbox("👤 Selecionar BDR", bdrs)
+    with col1:
+        total_deals = len(df[df['etapa'] != 'ONB'])
+        st.metric("📋 Deals Ativos", total_deals)
     
-    # Filtro por etapa
-    etapas = ['Todas'] + sorted(df['etapa'].dropna().unique().tolist())
-    selected_etapa = st.sidebar.selectbox("🎯 Selecionar Etapa", etapas)
+    with col2:
+        deals_onb = len(df[df['etapa'] == 'ONB'])
+        st.metric("✅ Onboardings", deals_onb)
     
-    # Aplicar filtros
-    filtered_df = df.copy()
-    if selected_bdr != 'Todos':
-        filtered_df = filtered_df[filtered_df['bdr'] == selected_bdr]
-    if selected_etapa != 'Todas':
-        filtered_df = filtered_df[filtered_df['etapa'] == selected_etapa]
+    with col3:
+        deals_bc = len(df[df['etapa'] == 'BC'])
+        st.metric("🔥 Business Case", deals_bc)
     
-    # Calcular métricas
-    metrics = calculate_metrics(filtered_df)
+    with col4:
+        if total_deals > 0:
+            conversion_rate = (deals_onb / (total_deals + deals_onb)) * 100
+            st.metric("📊 Taxa Conversão", f"{conversion_rate:.1f}%")
+        else:
+            st.metric("📊 Taxa Conversão", "0%")
     
-    # Informações no sidebar
-    st.sidebar.markdown("---")
-    st.sidebar.metric("📊 Total de Deals", metrics.get('total_deals', 0))
-    st.sidebar.metric("📅 Para Hoje", metrics.get('deals_hoje', 0))
-    st.sidebar.metric("⚠️ Atrasados", metrics.get('deals_atrasados', 0))
+    # Abas principais
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Previsões", "🧪 Cenários", "📋 Deals", "📊 Análises"])
     
-    # Botão de atualizar
-    if st.sidebar.button("🔄 Atualizar Dados"):
-        st.cache_data.clear()
-        st.rerun()
-    
-    # Layout principal com tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔮 Calculadora Pipeline", "📈 Dashboard", "📋 Lista de Deals", "⚠️ Deals Atrasados", "📊 Análises"])
-    
-    # TAB 1: CALCULADORA PIPELINE (PRINCIPAL)
     with tab1:
-        st.header("🔮 Calculadora Pipeline de Vendas")
+        st.header("📅 Previsão de Conversões - Próximos 15 dias úteis")
         
-        # Configurações do funil
-        st.subheader("⚙️ Configurações do Funil")
-        
+        # Filtros
         col1, col2 = st.columns(2)
-        
         with col1:
-            st.write("**Taxa de Conversão (%)**")
-            sal_cvr = st.slider("SAL → SQL", 0, 100, 80, key="sal_cvr")
-            sql_cvr = st.slider("SQL → OPP", 0, 100, 90, key="sql_cvr") 
-            opp_cvr = st.slider("OPP → BC", 0, 100, 75, key="opp_cvr")
-            bc_cvr = st.slider("BC → ONB", 0, 100, 67, key="bc_cvr")
+            bdrs = ['Todos'] + list(df['bdr'].dropna().unique())
+            selected_bdr = st.selectbox("👤 Filtrar por BDR", bdrs)
         
         with col2:
-            st.write("**Lead Time (dias úteis)**")
-            sal_days = st.number_input("SAL Lead Time", 0, 30, 2, key="sal_days")
-            sql_days = st.number_input("SQL Lead Time", 0, 30, 0, key="sql_days")
-            opp_days = st.number_input("OPP Lead Time", 0, 30, 2, key="opp_days")
-            bc_days = st.number_input("BC Lead Time", 0, 30, 5, key="bc_days")
+            etapas = ['Todas'] + ETAPAS_FUNIL
+            selected_etapa = st.selectbox("🎯 Filtrar por Etapa", etapas)
         
-        # Calcular pipeline atual
-        if not filtered_df.empty:
-            pipeline_results = calculate_pipeline_forecast(filtered_df, {
-                'SAL': {'cvr': sal_cvr, 'days': sal_days},
-                'SQL': {'cvr': sql_cvr, 'days': sql_days}, 
-                'OPP': {'cvr': opp_cvr, 'days': opp_days},
-                'BC': {'cvr': bc_cvr, 'days': bc_days}
-            })
+        # Aplica filtros
+        filtered_df = df.copy()
+        if selected_bdr != 'Todos':
+            filtered_df = filtered_df[filtered_df['bdr'] == selected_bdr]
+        if selected_etapa != 'Todas':
+            filtered_df = filtered_df[filtered_df['etapa'] == selected_etapa]
+        
+        # Calcula previsões
+        config = {
+            'conversion_rates': conversion_rates,
+            'lead_times': lead_times
+        }
+        
+        prediction_df = calculate_conversion_prediction(filtered_df, config)
+        
+        if not prediction_df.empty:
+            # Gráfico
+            chart = create_conversion_chart(prediction_df)
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
             
-            # Tabela de previsão
-            st.subheader("📅 Previsão Pipeline - Próximos 15 dias úteis")
+            # Tabela
+            safe_display_dataframe(prediction_df, "📊 Detalhes das Previsões")
             
-            if pipeline_results:
-                df_pipeline = pd.DataFrame(pipeline_results)
-                df_pipeline['Data'] = df_pipeline['date'].dt.strftime('%d/%m')
-                df_pipeline['Dia'] = df_pipeline['date'].dt.strftime('%a')
-                
-                # Destacar quartas-feiras
-                def highlight_wednesday(row):
-                    if row['date'].weekday() == 2:  # Quarta-feira
-                        return ['background-color: #fff3cd'] * len(row)
-                    return [''] * len(row)
-                
-                display_cols = ['Data', 'Dia', 'SAL', 'SQL', 'OPP', 'BC', 'ONB']
-                styled_df = df_pipeline[display_cols].style.apply(highlight_wednesday, axis=1)
-                
-                st.dataframe(styled_df, use_container_width=True, height=400)
-                
-                # Gráfico de evolução
-                fig_evolution = create_pipeline_evolution_chart(df_pipeline)
-                st.plotly_chart(fig_evolution, use_container_width=True)
-                
-                # Métricas de resumo
-                col1, col2, col3, col4 = st.columns(4)
-                
-                total_onb_15_days = df_pipeline['ONB'].sum()
-                deals_proxima_quarta = get_next_wednesday_deals(df_pipeline)
-                
-                with col1:
-                    st.metric("🎯 ONBs próximos 15 dias", f"{total_onb_15_days:.1f}")
-                with col2:
-                    st.metric("📅 ONBs próxima quarta", f"{deals_proxima_quarta:.1f}")
-                with col3:
-                    pipeline_atual = filtered_df.shape[0]
-                    st.metric("📊 Pipeline atual", pipeline_atual)
-                with col4:
-                    conversion_rate = (total_onb_15_days / pipeline_atual * 100) if pipeline_atual > 0 else 0
-                    st.metric("📈 Taxa conversão", f"{conversion_rate:.1f}%")
-        
-        # Teste de cenários
-        st.subheader("🎮 Teste de Cenários")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            scenario_sal = st.number_input("Novos SALs hoje", 0, 100, 5, key="scenario_sal")
-        with col2:
-            scenario_sql = st.number_input("Novos SQLs hoje", 0, 100, 2, key="scenario_sql") 
-        with col3:
-            scenario_opp = st.number_input("Novos OPPs hoje", 0, 100, 1, key="scenario_opp")
-        
-        if st.button("🔮 Calcular Cenário"):
-            scenario_results = calculate_scenario_impact(
-                scenario_sal, scenario_sql, scenario_opp,
-                {
-                    'SAL': {'cvr': sal_cvr, 'days': sal_days},
-                    'SQL': {'cvr': sql_cvr, 'days': sql_days},
-                    'OPP': {'cvr': opp_cvr, 'days': opp_days}, 
-                    'BC': {'cvr': bc_cvr, 'days': bc_days}
-                }
-            )
+            # Resumo
+            total_conversoes = prediction_df['Conversões Previstas'].sum()
+            quartas_conversoes = prediction_df[prediction_df['É Quarta'] == True]['Conversões Previstas'].sum()
             
-            st.success(f"**Impacto do Cenário:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🎯 Total Previsto", f"{total_conversoes:.1f}")
+            with col2:
+                st.metric("📅 Em Quartas-feiras", f"{quartas_conversoes:.1f}")
+            with col3:
+                if total_conversoes > 0:
+                    perc_quartas = (quartas_conversoes / total_conversoes) * 100
+                    st.metric("📊 % em Quartas", f"{perc_quartas:.1f}%")
+        else:
+            st.info("📭 Nenhuma conversão prevista com os filtros atuais")
+    
+    with tab2:
+        st.header("🧪 Teste de Cenários")
+        st.markdown("*Simule novos deals e veja o impacto nas previsões*")
+        
+        # Formulário para cenários
+        with st.form("scenario_form"):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("🎯 ONBs adicionais", f"+{scenario_results['additional_onbs']:.1f}")
+                scenario_name = st.text_input("📝 Nome do Cenário", "Cenário Teste")
+                scenario_stage = st.selectbox("🎯 Etapa Inicial", ETAPAS_FUNIL[:-1])
+            
             with col2:
-                st.metric("📅 Primeira conversão em", f"{scenario_results['first_conversion_days']} dias")
+                scenario_quantity = st.number_input("📊 Quantidade de Deals", min_value=1, max_value=100, value=5)
+                scenario_bdr = st.text_input("👤 BDR", "Teste")
+            
             with col3:
-                st.metric("💰 Receita estimada", f"R$ {scenario_results['estimated_revenue']:,.0f}")
+                scenario_date = st.date_input("📅 Data de Entrada", datetime.now().date())
+                submit_scenario = st.form_submit_button("🚀 Simular Cenário")
         
-        else:
-            st.info("👆 Configure o cenário acima e clique em 'Calcular Cenário'")
-    
-    with tab2:
-        # Métricas principais
-        col1, col2, col3, col4 = st.columns(4)
-        
-        stage_counts = metrics.get('stage_counts', {})
-        
-        with col1:
-            st.metric("🔵 SAL", stage_counts.get('SAL', 0))
-        with col2:
-            st.metric("🟡 OPP", stage_counts.get('OPP', 0))
-        with col3:
-            st.metric("🟢 BC", stage_counts.get('BC', 0))
-        with col4:
-            st.metric("🟣 ONB_AGEND", stage_counts.get('ONB_AGEND', 0))
-        
-        # Gráficos
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Gráfico de funil
-            funnel_fig = create_funnel_chart(stage_counts)
-            st.plotly_chart(funnel_fig, use_container_width=True)
-        
-        with col2:
-            # Gráfico de distribuição por BDR
-            if not filtered_df.empty:
-                bdr_counts = filtered_df['bdr'].value_counts()
-                fig = px.pie(
-                    values=bdr_counts.values, 
-                    names=bdr_counts.index,
-                    title="👥 Distribuição por BDR"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # TAB 3: Lista de Deals
-    with tab3:
-        st.subheader("📋 Lista Completa de Deals")
-        
-        if not filtered_df.empty:
-            # Adicionar coluna de dias na etapa
-            display_df = filtered_df.copy()
-            display_df['dias_na_etapa'] = (datetime.now() - display_df['data_entrada']).dt.days
+        if submit_scenario:
+            # Cria cenário
+            test_scenarios = [{
+                'nome': scenario_name,
+                'etapa': scenario_stage,
+                'quantidade': scenario_quantity,
+                'bdr': scenario_bdr,
+                'data_entrada': scenario_date
+            }]
             
-            # Selecionar colunas para exibir
-            columns_to_show = ['id', 'dealname', 'etapa', 'data_entrada', 'bdr', 'dias_na_etapa']
-            display_df = display_df[columns_to_show]
+            # Calcula previsão com cenário
+            scenario_prediction = calculate_conversion_prediction(df, config, test_scenarios)
             
-            # Ordenar por data de entrada (mais recente primeiro)
-            display_df = display_df.sort_values('data_entrada', ascending=False)
-            
-            # Exibir tabela
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                height=600
-            )
-            
-            # Download
-            csv = display_df.to_csv(index=False)
-            st.download_button(
-                "📥 Download CSV",
-                csv,
-                "pipeline_deals.csv",
-                "text/csv"
-            )
-        else:
-            st.info("Nenhum deal encontrado com os filtros selecionados.")
-    
-    # TAB 4: Deals Atrasados
-    with tab4:
-        st.subheader("⚠️ Deals Atrasados (7+ dias na etapa)")
-        
-        if not filtered_df.empty:
-            # Filtrar deals atrasados
-            dias_na_etapa = (datetime.now() - filtered_df['data_entrada']).dt.days
-            atrasados_df = filtered_df[dias_na_etapa > 7].copy()
-            atrasados_df['dias_na_etapa'] = dias_na_etapa[dias_na_etapa > 7]
-            
-            if not atrasados_df.empty:
-                # Ordenar por dias na etapa (mais atrasado primeiro)
-                atrasados_df = atrasados_df.sort_values('dias_na_etapa', ascending=False)
+            if not scenario_prediction.empty:
+                st.success(f"✅ Cenário '{scenario_name}' simulado com sucesso!")
                 
-                # Adicionar cor baseada na urgência
-                def get_urgency_color(dias):
-                    if dias > 14:
-                        return "🔴"
-                    elif dias > 10:
-                        return "🟡"
-                    else:
-                        return "🟠"
+                # Mostra apenas deals do cenário
+                scenario_only = scenario_prediction[scenario_prediction['Total Deals'] > 0]
                 
-                atrasados_df['urgencia'] = atrasados_df['dias_na_etapa'].apply(get_urgency_color)
-                
-                # Selecionar colunas
-                columns_to_show = ['urgencia', 'dealname', 'etapa', 'data_entrada', 'bdr', 'dias_na_etapa']
-                display_df = atrasados_df[columns_to_show]
-                
-                st.dataframe(display_df, use_container_width=True, height=400)
-                
-                # Métricas de urgência
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("🔴 Críticos (14+ dias)", len(atrasados_df[atrasados_df['dias_na_etapa'] > 14]))
-                with col2:
-                    st.metric("🟡 Atenção (10-14 dias)", len(atrasados_df[(atrasados_df['dias_na_etapa'] > 10) & (atrasados_df['dias_na_etapa'] <= 14)]))
-                with col3:
-                    st.metric("🟠 Moderado (7-10 dias)", len(atrasados_df[(atrasados_df['dias_na_etapa'] > 7) & (atrasados_df['dias_na_etapa'] <= 10)]))
+                if not scenario_only.empty:
+                    # Gráfico do cenário
+                    chart = create_conversion_chart(scenario_only)
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True)
+                    
+                    # Tabela do cenário
+                    safe_display_dataframe(scenario_only, f"📊 Impacto do Cenário: {scenario_name}")
+                    
+                    # Métricas do cenário
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        total_scenario = scenario_only['Conversões Previstas'].sum()
+                        st.metric("🎯 Conversões Previstas", f"{total_scenario:.1f}")
+                    with col2:
+                        scenario_wednesdays = scenario_only[scenario_only['É Quarta'] == True]['Conversões Previstas'].sum()
+                        st.metric("📅 Em Quartas-feiras", f"{scenario_wednesdays:.1f}")
             else:
-                st.success("🎉 Nenhum deal atrasado! Excelente trabalho!")
-        else:
-            st.info("Nenhum dado disponível.")
+                st.warning("⚠️ O cenário não gerou previsões no período analisado")
     
-    # TAB 5: Análises
-    with tab5:
-        st.subheader("📊 Análises Avançadas")
+    with tab3:
+        st.header("📋 Lista Completa de Deals")
         
-        if not filtered_df.empty:
-            # Timeline dos deals
-            timeline_fig = create_timeline_chart(filtered_df)
-            if timeline_fig:
-                st.plotly_chart(timeline_fig, use_container_width=True)
+        # Filtros
+        col1, col2 = st.columns(2)
+        with col1:
+            bdrs_filter = ['Todos'] + list(df['bdr'].dropna().unique())
+            bdr_filter = st.selectbox("👤 BDR", bdrs_filter, key="deals_bdr")
+        
+        with col2:
+            etapas_filter = ['Todas'] + ETAPAS_FUNIL
+            etapa_filter = st.selectbox("🎯 Etapa", etapas_filter, key="deals_etapa")
+        
+        # Aplica filtros
+        deals_df = df.copy()
+        if bdr_filter != 'Todos':
+            deals_df = deals_df[deals_df['bdr'] == bdr_filter]
+        if etapa_filter != 'Todas':
+            deals_df = deals_df[deals_df['etapa'] == etapa_filter]
+        
+        # Deals atrasados
+        late_deals = get_deals_late(deals_df)
+        if not late_deals.empty:
+            st.subheader("🚨 Deals Atrasados")
+            safe_display_dataframe(late_deals, height=300)
+            st.divider()
+        
+        # Lista geral
+        if not deals_df.empty:
+            # Preparar dados para exibição
+            display_cols = ['dealname', 'etapa', 'bdr', 'data_entrada', 'data_prevista_onboarding']
+            available_cols = [col for col in display_cols if col in deals_df.columns]
             
-            # Estatísticas por etapa
+            deals_display = deals_df[available_cols].copy()
+            
+            # Renomear colunas
+            column_rename = {
+                'dealname': 'Deal',
+                'etapa': 'Etapa',
+                'bdr': 'BDR',
+                'data_entrada': 'Data Entrada',
+                'data_prevista_onboarding': 'Data Prev. ONB'
+            }
+            deals_display = deals_display.rename(columns=column_rename)
+            
+            safe_display_dataframe(deals_display, f"📊 Total: {len(deals_display)} deals")
+        else:
+            st.info("📭 Nenhum deal encontrado com os filtros aplicados")
+    
+    with tab4:
+        st.header("📊 Análises Avançadas")
+        
+        if not df.empty:
+            # Distribuição por etapa
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("📈 Tempo Médio por Etapa")
-                tempo_por_etapa = filtered_df.groupby('etapa')['dias_na_etapa'].agg(['mean', 'median', 'std']).round(1)
-                st.dataframe(tempo_por_etapa)
+                etapa_counts = df['etapa'].value_counts()
+                fig_pie = px.pie(
+                    values=etapa_counts.values,
+                    names=etapa_counts.index,
+                    title="📊 Distribuição por Etapa"
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
             
             with col2:
-                st.subheader("👥 Performance por BDR")
-                perf_bdr = filtered_df.groupby('bdr').agg({
-                    'id': 'count',
-                    'dias_na_etapa': 'mean'
-                }).round(1)
-                perf_bdr.columns = ['Total Deals', 'Tempo Médio']
-                st.dataframe(perf_bdr)
+                # Análise por BDR
+                if 'bdr' in df.columns:
+                    bdr_counts = df.groupby('bdr')['etapa'].count().sort_values(ascending=False)
+                    fig_bar = px.bar(
+                        x=bdr_counts.index,
+                        y=bdr_counts.values,
+                        title="👤 Deals por BDR",
+                        labels={'x': 'BDR', 'y': 'Número de Deals'}
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+            
+            # Evolução temporal
+            if 'data_entrada' in df.columns:
+                df_with_dates = df.dropna(subset=['data_entrada'])
+                if not df_with_dates.empty:
+                    df_with_dates['mes'] = df_with_dates['data_entrada'].dt.to_period('M')
+                    monthly_deals = df_with_dates.groupby('mes').size()
+                    
+                    fig_line = px.line(
+                        x=monthly_deals.index.astype(str),
+                        y=monthly_deals.values,
+                        title="📈 Evolução de Deals por Mês",
+                        labels={'x': 'Mês', 'y': 'Número de Deals'}
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
         else:
-            st.info("Selecione filtros para ver as análises.")
+            st.info("📭 Dados insuficientes para análises")
     
     # Footer
-    st.markdown("---")
-    st.markdown(f"🔄 **Última atualização:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    st.markdown("📊 **Dados em tempo real** conectados com Google Sheets")
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("🔄 Atualização automática a cada 5 minutos")
+    with col2:
+        st.caption("📊 Dados: Google Sheets")
+    with col3:
+        st.caption(f"🕒 Última atualização: {datetime.now().strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
     main()
