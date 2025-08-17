@@ -15,35 +15,117 @@ st.set_page_config(
 )
 
 # Configurações globais
-GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1L0nO-rchxshEufLANyH3aEz6hFulvpq1OMPUzTw76LM/export?format=csv&gid=0"
+GOOGLE_SHEETS_ID = "1L0nO-rchxshEufLANyH3aEz6hFulvpq1OMPUzTw76LM"
 ETAPAS_FUNIL = ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND', 'ONB']
 
 @st.cache_data(ttl=300)  # Cache por 5 minutos
 def load_data():
-    """Carrega dados do Google Sheets"""
-    try:
-        response = requests.get(GOOGLE_SHEETS_URL)
-        response.raise_for_status()
-        
-        # Lê o CSV
-        df = pd.read_csv(StringIO(response.text))
-        
-        # Limpeza básica dos dados
-        df.columns = df.columns.str.strip()
-        
-        # Converte datas
-        date_columns = ['data_entrada', 'data_prevista_onboarding']
-        for col in date_columns:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-        
-        # Remove linhas vazias
-        df = df.dropna(subset=['dealname'])
-        
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar dados: {e}")
-        return pd.DataFrame()
+    """Carrega dados do Google Sheets com múltiplas tentativas"""
+    
+    # Diferentes formatos de URL para tentar
+    urls_to_try = [
+        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=csv&gid=0",
+        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=csv",
+        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/gviz/tq?tqx=out:csv&gid=0",
+        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/gviz/tq?tqx=out:csv"
+    ]
+    
+    for i, url in enumerate(urls_to_try):
+        try:
+            st.info(f"🔄 Tentativa {i+1}/4: Carregando dados do Google Sheets...")
+            
+            # Headers para simular navegador
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            # Verifica se o conteúdo é válido
+            if len(response.text) < 10:
+                raise ValueError("Resposta muito pequena")
+            
+            # Tenta ler o CSV
+            df = pd.read_csv(StringIO(response.text))
+            
+            if df.empty or len(df.columns) < 3:
+                raise ValueError("DataFrame vazio ou inválido")
+            
+            # Limpeza básica dos dados
+            df.columns = df.columns.str.strip()
+            
+            # Verifica se tem as colunas essenciais
+            required_cols = ['dealname', 'etapa']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                st.warning(f"⚠️ Colunas não encontradas: {missing_cols}")
+                st.info(f"📋 Colunas disponíveis: {list(df.columns)}")
+            
+            # Converte datas se existirem
+            date_columns = ['data_entrada', 'data_prevista_onboarding']
+            for col in date_columns:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+            
+            # Remove linhas vazias se possível
+            if 'dealname' in df.columns:
+                df = df.dropna(subset=['dealname'])
+            
+            st.success(f"✅ Dados carregados com sucesso! {len(df)} registros encontrados.")
+            return df
+            
+        except Exception as e:
+            error_msg = str(e)
+            st.warning(f"⚠️ Tentativa {i+1} falhou: {error_msg[:100]}...")
+            
+            if i == len(urls_to_try) - 1:  # Última tentativa
+                st.error("❌ Todas as tentativas falharam!")
+                
+                # Instruções para o usuário
+                with st.expander("🔧 Como resolver este problema"):
+                    st.markdown(f"""
+                    **Possíveis soluções:**
+                    
+                    1. **Verificar permissões da planilha:**
+                       - Acesse: https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}
+                       - Clique em "Compartilhar"
+                       - Altere para "Qualquer pessoa com o link pode visualizar"
+                    
+                    2. **Verificar ID da planilha:**
+                       - ID atual: `{GOOGLE_SHEETS_ID}`
+                       - Confirme se está correto na URL da sua planilha
+                    
+                    3. **Testar URLs manualmente:**
+                       - Teste este link no navegador:
+                       - {urls_to_try[0]}
+                    
+                    4. **Usar dados de teste:**
+                       - Marque a opção abaixo para usar dados fictícios
+                    """)
+                    
+                    if st.button("🧪 Usar dados de teste"):
+                        return create_sample_data()
+                
+                return pd.DataFrame()
+    
+    return pd.DataFrame()
+
+def create_sample_data():
+    """Cria dados de exemplo para teste"""
+    sample_data = {
+        'id': range(1, 21),
+        'dealname': [f'Deal Teste {i}' for i in range(1, 21)],
+        'etapa': ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND'] * 4,
+        'data_entrada': pd.date_range('2024-01-01', periods=20, freq='3D'),
+        'data_prevista_onboarding': pd.date_range('2024-02-01', periods=20, freq='5D'),
+        'bdr': ['BDR A', 'BDR B', 'BDR C'] * 6 + ['BDR A', 'BDR B']
+    }
+    
+    df = pd.DataFrame(sample_data)
+    st.info("🧪 Usando dados de teste. Substitua pela planilha real quando possível.")
+    return df
 
 def is_business_day(date):
     """Verifica se é dia útil (Segunda a Sexta)"""
@@ -331,11 +413,16 @@ def main():
             )
     
     # Carrega dados
-    with st.spinner("📥 Carregando dados..."):
-        df = load_data()
+    df = load_data()
     
     if df.empty:
-        st.error("❌ Não foi possível carregar os dados do Google Sheets")
+        st.warning("⚠️ Nenhum dado disponível. Verifique a conexão com o Google Sheets.")
+        
+        # Botão para tentar recarregar
+        if st.button("🔄 Tentar Recarregar Dados"):
+            st.cache_data.clear()  # Limpa o cache
+            st.rerun()
+        
         return
     
     # Métricas principais
