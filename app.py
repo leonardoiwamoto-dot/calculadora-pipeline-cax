@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import numpy as np
 from io import StringIO
 import requests
+import time
 
 # Configuração da página
 st.set_page_config(
@@ -22,46 +23,32 @@ ETAPAS_FUNIL = ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND', 'ONB']
 def load_data():
     """Carrega dados do Google Sheets com múltiplas tentativas"""
     
-    # Diferentes formatos de URL para tentar
+    # URLs para tentar
     urls_to_try = [
         f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=csv&gid=0",
         f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=csv",
-        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/gviz/tq?tqx=out:csv&gid=0",
-        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/gviz/tq?tqx=out:csv"
+        f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/gviz/tq?tqx=out:csv&gid=0"
     ]
     
     for i, url in enumerate(urls_to_try):
         try:
-            st.info(f"🔄 Tentativa {i+1}/4: Carregando dados do Google Sheets...")
-            
-            # Headers para simular navegador
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             
-            # Verifica se o conteúdo é válido
             if len(response.text) < 10:
-                raise ValueError("Resposta muito pequena")
+                continue
             
-            # Tenta ler o CSV
             df = pd.read_csv(StringIO(response.text))
             
-            if df.empty or len(df.columns) < 3:
-                raise ValueError("DataFrame vazio ou inválido")
+            if df.empty or len(df.columns) < 2:
+                continue
             
-            # Limpeza básica dos dados
+            # Limpeza básica
             df.columns = df.columns.str.strip()
-            
-            # Verifica se tem as colunas essenciais
-            required_cols = ['dealname', 'etapa']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            
-            if missing_cols:
-                st.warning(f"⚠️ Colunas não encontradas: {missing_cols}")
-                st.info(f"📋 Colunas disponíveis: {list(df.columns)}")
             
             # Converte datas se existirem
             date_columns = ['data_entrada', 'data_prevista_onboarding']
@@ -69,63 +56,31 @@ def load_data():
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
             
-            # Remove linhas vazias se possível
+            # Remove linhas vazias
             if 'dealname' in df.columns:
                 df = df.dropna(subset=['dealname'])
             
-            st.success(f"✅ Dados carregados com sucesso! {len(df)} registros encontrados.")
             return df
             
         except Exception as e:
-            error_msg = str(e)
-            st.warning(f"⚠️ Tentativa {i+1} falhou: {error_msg[:100]}...")
-            
-            if i == len(urls_to_try) - 1:  # Última tentativa
-                st.error("❌ Todas as tentativas falharam!")
-                
-                # Instruções para o usuário
-                with st.expander("🔧 Como resolver este problema"):
-                    st.markdown(f"""
-                    **Possíveis soluções:**
-                    
-                    1. **Verificar permissões da planilha:**
-                       - Acesse: https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}
-                       - Clique em "Compartilhar"
-                       - Altere para "Qualquer pessoa com o link pode visualizar"
-                    
-                    2. **Verificar ID da planilha:**
-                       - ID atual: `{GOOGLE_SHEETS_ID}`
-                       - Confirme se está correto na URL da sua planilha
-                    
-                    3. **Testar URLs manualmente:**
-                       - Teste este link no navegador:
-                       - {urls_to_try[0]}
-                    
-                    4. **Usar dados de teste:**
-                       - Marque a opção abaixo para usar dados fictícios
-                    """)
-                    
-                    if st.button("🧪 Usar dados de teste"):
-                        return create_sample_data()
-                
-                return pd.DataFrame()
+            if i == len(urls_to_try) - 1:
+                # Retorna dados de exemplo em caso de falha
+                return create_sample_data()
+            continue
     
-    return pd.DataFrame()
+    return create_sample_data()
 
 def create_sample_data():
-    """Cria dados de exemplo para teste"""
+    """Cria dados de exemplo para demonstração"""
     sample_data = {
         'id': range(1, 21),
-        'dealname': [f'Deal Teste {i}' for i in range(1, 21)],
+        'dealname': [f'Deal Exemplo {i}' for i in range(1, 21)],
         'etapa': ['SAL', 'SQL', 'OPP', 'BC', 'ONB_AGEND'] * 4,
         'data_entrada': pd.date_range('2024-01-01', periods=20, freq='3D'),
         'data_prevista_onboarding': pd.date_range('2024-02-01', periods=20, freq='5D'),
         'bdr': ['BDR A', 'BDR B', 'BDR C'] * 6 + ['BDR A', 'BDR B']
     }
-    
-    df = pd.DataFrame(sample_data)
-    st.info("🧪 Usando dados de teste. Substitua pela planilha real quando possível.")
-    return df
+    return pd.DataFrame(sample_data)
 
 def is_business_day(date):
     """Verifica se é dia útil (Segunda a Sexta)"""
@@ -177,12 +132,12 @@ def calculate_conversion_prediction(df, config, test_scenarios=None):
         if deal['etapa'] not in ETAPAS_FUNIL or deal['etapa'] == 'ONB':
             continue
         
-        # Data atual para cálculo
+        # Data base para cálculo
         base_date = datetime.now().date()
         if pd.notna(deal.get('data_entrada')):
             base_date = max(base_date, deal['data_entrada'].date())
         
-        # Calcula conversão por etapa
+        # Calcula conversão
         current_stage_idx = ETAPAS_FUNIL.index(deal['etapa'])
         probability = 1.0
         
@@ -201,7 +156,6 @@ def calculate_conversion_prediction(df, config, test_scenarios=None):
                     'data': conversion_date,
                     'deal': deal['dealname'],
                     'etapa_origem': deal['etapa'],
-                    'etapa_destino': 'ONB',
                     'probabilidade': probability,
                     'bdr': deal.get('bdr', 'N/A'),
                     'tipo': 'Existente'
@@ -236,7 +190,6 @@ def calculate_conversion_prediction(df, config, test_scenarios=None):
                             'data': conversion_date,
                             'deal': f"Cenário {scenario.get('nome', 'Teste')} #{i+1}",
                             'etapa_origem': stage,
-                            'etapa_destino': 'ONB',
                             'probabilidade': probability,
                             'bdr': scenario.get('bdr', 'Teste'),
                             'tipo': 'Cenário'
@@ -265,7 +218,7 @@ def calculate_conversion_prediction(df, config, test_scenarios=None):
     return summary
 
 def safe_display_dataframe(df, title="", height=400):
-    """Exibe DataFrame de forma segura sem formatação problemática"""
+    """Exibe DataFrame de forma segura"""
     if title:
         st.subheader(title)
     
@@ -274,23 +227,16 @@ def safe_display_dataframe(df, title="", height=400):
         return
     
     try:
-        # Destaca quartas-feiras de forma simples
+        # Destaca quartas-feiras com emoji
         if 'É Quarta' in df.columns:
-            # Cria uma cópia para exibição
             display_df = df.copy()
-            
-            # Adiciona emoji para quartas-feiras
             display_df.loc[display_df['É Quarta'] == True, 'Dia Semana'] = '🎯 ' + display_df.loc[display_df['É Quarta'] == True, 'Dia Semana']
-            
-            # Remove coluna booleana
             display_df = display_df.drop('É Quarta', axis=1)
-            
             st.dataframe(display_df, use_container_width=True, height=height)
         else:
             st.dataframe(df, use_container_width=True, height=height)
             
     except Exception as e:
-        st.warning(f"⚠️ Problema na formatação: {str(e)[:100]}")
         st.dataframe(df, use_container_width=True, height=height)
 
 def create_conversion_chart(df):
@@ -307,27 +253,23 @@ def create_conversion_chart(df):
             x=normal_days['Data'],
             y=normal_days['Conversões Previstas'],
             name='Dias Normais',
-            marker_color='#1f77b4',
-            hovertemplate='<b>%{x}</b><br>Conversões: %{y:.1f}<extra></extra>'
+            marker_color='#1f77b4'
         ))
     
-    # Barras para quartas-feiras
+    # Quartas-feiras
     wednesdays = df[df['É Quarta'] == True]
     if not wednesdays.empty:
         fig.add_trace(go.Bar(
             x=wednesdays['Data'],
             y=wednesdays['Conversões Previstas'],
-            name='🎯 Quartas-feiras (ONB)',
-            marker_color='#ff7f0e',
-            hovertemplate='<b>%{x} (Quarta-feira)</b><br>Conversões: %{y:.1f}<extra></extra>'
+            name='🎯 Quartas-feiras',
+            marker_color='#ff7f0e'
         ))
     
     fig.update_layout(
         title='📈 Previsão de Conversões por Dia',
         xaxis_title='Data',
-        yaxis_title='Conversões Previstas',
-        hovermode='x unified',
-        showlegend=True
+        yaxis_title='Conversões Previstas'
     )
     
     return fig
@@ -339,7 +281,7 @@ def get_deals_late(df):
     
     today = datetime.now().date()
     
-    # Deals com data prevista passada
+    # Deals atrasados
     late_deals = df[
         (pd.notna(df['data_prevista_onboarding'])) &
         (df['data_prevista_onboarding'].dt.date < today) &
@@ -349,7 +291,7 @@ def get_deals_late(df):
     if late_deals.empty:
         return pd.DataFrame()
     
-    # Calcula dias de atraso
+    # Calcula atraso
     late_deals['dias_atraso'] = (today - late_deals['data_prevista_onboarding'].dt.date).dt.days
     
     # Classifica urgência
@@ -363,7 +305,6 @@ def get_deals_late(df):
     
     late_deals['urgencia'] = late_deals['dias_atraso'].apply(classify_urgency)
     
-    # Seleciona e ordena colunas
     result = late_deals[[
         'dealname', 'etapa', 'data_prevista_onboarding', 
         'dias_atraso', 'urgencia', 'bdr'
@@ -382,9 +323,12 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configurações")
         
-        # Atualização automática
-        auto_refresh = st.checkbox("🔄 Auto-atualização (5min)", value=True)
-        if auto_refresh:
+        # REMOVIDO: Auto-refresh que causava loop infinito
+        st.info("🔄 Atualize a página manualmente para dados mais recentes")
+        
+        # Botão manual para recarregar
+        if st.button("🔄 Recarregar Dados"):
+            st.cache_data.clear()
             st.rerun()
         
         st.divider()
@@ -392,7 +336,7 @@ def main():
         # Configurações de conversão
         st.subheader("📈 Taxas de Conversão")
         conversion_rates = {}
-        for etapa in ETAPAS_FUNIL[:-1]:  # Exclui ONB
+        for etapa in ETAPAS_FUNIL[:-1]:
             conversion_rates[etapa] = st.slider(
                 f"{etapa}", 0.0, 1.0, 
                 value={'SAL': 0.6, 'SQL': 0.7, 'OPP': 0.8, 'BC': 0.9, 'ONB_AGEND': 0.95}.get(etapa, 0.5),
@@ -405,7 +349,7 @@ def main():
         # Lead times
         st.subheader("⏱️ Lead Times (dias úteis)")
         lead_times = {}
-        for etapa in ETAPAS_FUNIL[:-1]:  # Exclui ONB
+        for etapa in ETAPAS_FUNIL[:-1]:
             lead_times[etapa] = st.number_input(
                 f"{etapa}", min_value=0, max_value=30,
                 value={'SAL': 2, 'SQL': 3, 'OPP': 5, 'BC': 7, 'ONB_AGEND': 2}.get(etapa, 2),
@@ -416,14 +360,12 @@ def main():
     df = load_data()
     
     if df.empty:
-        st.warning("⚠️ Nenhum dado disponível. Verifique a conexão com o Google Sheets.")
-        
-        # Botão para tentar recarregar
-        if st.button("🔄 Tentar Recarregar Dados"):
-            st.cache_data.clear()  # Limpa o cache
-            st.rerun()
-        
+        st.error("❌ Erro ao carregar dados")
         return
+    
+    # Verifica se são dados de exemplo
+    if 'Deal Exemplo' in str(df['dealname'].iloc[0]):
+        st.warning("⚠️ Usando dados de exemplo. Configure o acesso ao Google Sheets para dados reais.")
     
     # Métricas principais
     col1, col2, col3, col4 = st.columns(4)
@@ -505,7 +447,6 @@ def main():
     
     with tab2:
         st.header("🧪 Teste de Cenários")
-        st.markdown("*Simule novos deals e veja o impacto nas previsões*")
         
         # Formulário para cenários
         with st.form("scenario_form"):
@@ -516,7 +457,7 @@ def main():
                 scenario_stage = st.selectbox("🎯 Etapa Inicial", ETAPAS_FUNIL[:-1])
             
             with col2:
-                scenario_quantity = st.number_input("📊 Quantidade de Deals", min_value=1, max_value=100, value=5)
+                scenario_quantity = st.number_input("📊 Quantidade", min_value=1, max_value=100, value=5)
                 scenario_bdr = st.text_input("👤 BDR", "Teste")
             
             with col3:
@@ -524,7 +465,6 @@ def main():
                 submit_scenario = st.form_submit_button("🚀 Simular Cenário")
         
         if submit_scenario:
-            # Cria cenário
             test_scenarios = [{
                 'nome': scenario_name,
                 'etapa': scenario_stage,
@@ -533,74 +473,39 @@ def main():
                 'data_entrada': scenario_date
             }]
             
-            # Calcula previsão com cenário
             scenario_prediction = calculate_conversion_prediction(df, config, test_scenarios)
             
             if not scenario_prediction.empty:
-                st.success(f"✅ Cenário '{scenario_name}' simulado com sucesso!")
+                st.success(f"✅ Cenário '{scenario_name}' simulado!")
                 
-                # Mostra apenas deals do cenário
-                scenario_only = scenario_prediction[scenario_prediction['Total Deals'] > 0]
+                chart = create_conversion_chart(scenario_prediction)
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
                 
-                if not scenario_only.empty:
-                    # Gráfico do cenário
-                    chart = create_conversion_chart(scenario_only)
-                    if chart:
-                        st.plotly_chart(chart, use_container_width=True)
-                    
-                    # Tabela do cenário
-                    safe_display_dataframe(scenario_only, f"📊 Impacto do Cenário: {scenario_name}")
-                    
-                    # Métricas do cenário
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        total_scenario = scenario_only['Conversões Previstas'].sum()
-                        st.metric("🎯 Conversões Previstas", f"{total_scenario:.1f}")
-                    with col2:
-                        scenario_wednesdays = scenario_only[scenario_only['É Quarta'] == True]['Conversões Previstas'].sum()
-                        st.metric("📅 Em Quartas-feiras", f"{scenario_wednesdays:.1f}")
-            else:
-                st.warning("⚠️ O cenário não gerou previsões no período analisado")
+                safe_display_dataframe(scenario_prediction, f"📊 Cenário: {scenario_name}")
+                
+                total_scenario = scenario_prediction['Conversões Previstas'].sum()
+                st.metric("🎯 Conversões Previstas", f"{total_scenario:.1f}")
     
     with tab3:
-        st.header("📋 Lista Completa de Deals")
-        
-        # Filtros
-        col1, col2 = st.columns(2)
-        with col1:
-            bdrs_filter = ['Todos'] + list(df['bdr'].dropna().unique())
-            bdr_filter = st.selectbox("👤 BDR", bdrs_filter, key="deals_bdr")
-        
-        with col2:
-            etapas_filter = ['Todas'] + ETAPAS_FUNIL
-            etapa_filter = st.selectbox("🎯 Etapa", etapas_filter, key="deals_etapa")
-        
-        # Aplica filtros
-        deals_df = df.copy()
-        if bdr_filter != 'Todos':
-            deals_df = deals_df[deals_df['bdr'] == bdr_filter]
-        if etapa_filter != 'Todas':
-            deals_df = deals_df[deals_df['etapa'] == etapa_filter]
+        st.header("📋 Lista de Deals")
         
         # Deals atrasados
-        late_deals = get_deals_late(deals_df)
+        late_deals = get_deals_late(df)
         if not late_deals.empty:
             st.subheader("🚨 Deals Atrasados")
             safe_display_dataframe(late_deals, height=300)
             st.divider()
         
         # Lista geral
-        if not deals_df.empty:
-            # Preparar dados para exibição
+        if not df.empty:
             display_cols = ['dealname', 'etapa', 'bdr', 'data_entrada', 'data_prevista_onboarding']
-            available_cols = [col for col in display_cols if col in deals_df.columns]
+            available_cols = [col for col in display_cols if col in df.columns]
+            deals_display = df[available_cols].copy()
             
-            deals_display = deals_df[available_cols].copy()
-            
-            # Renomear colunas
             column_rename = {
                 'dealname': 'Deal',
-                'etapa': 'Etapa',
+                'etapa': 'Etapa', 
                 'bdr': 'BDR',
                 'data_entrada': 'Data Entrada',
                 'data_prevista_onboarding': 'Data Prev. ONB'
@@ -608,14 +513,11 @@ def main():
             deals_display = deals_display.rename(columns=column_rename)
             
             safe_display_dataframe(deals_display, f"📊 Total: {len(deals_display)} deals")
-        else:
-            st.info("📭 Nenhum deal encontrado com os filtros aplicados")
     
     with tab4:
-        st.header("📊 Análises Avançadas")
+        st.header("📊 Análises")
         
         if not df.empty:
-            # Distribuição por etapa
             col1, col2 = st.columns(2)
             
             with col1:
@@ -628,43 +530,24 @@ def main():
                 st.plotly_chart(fig_pie, use_container_width=True)
             
             with col2:
-                # Análise por BDR
                 if 'bdr' in df.columns:
                     bdr_counts = df.groupby('bdr')['etapa'].count().sort_values(ascending=False)
                     fig_bar = px.bar(
                         x=bdr_counts.index,
                         y=bdr_counts.values,
-                        title="👤 Deals por BDR",
-                        labels={'x': 'BDR', 'y': 'Número de Deals'}
+                        title="👤 Deals por BDR"
                     )
                     st.plotly_chart(fig_bar, use_container_width=True)
-            
-            # Evolução temporal
-            if 'data_entrada' in df.columns:
-                df_with_dates = df.dropna(subset=['data_entrada'])
-                if not df_with_dates.empty:
-                    df_with_dates['mes'] = df_with_dates['data_entrada'].dt.to_period('M')
-                    monthly_deals = df_with_dates.groupby('mes').size()
-                    
-                    fig_line = px.line(
-                        x=monthly_deals.index.astype(str),
-                        y=monthly_deals.values,
-                        title="📈 Evolução de Deals por Mês",
-                        labels={'x': 'Mês', 'y': 'Número de Deals'}
-                    )
-                    st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.info("📭 Dados insuficientes para análises")
     
     # Footer
     st.divider()
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.caption("🔄 Atualização automática a cada 5 minutos")
+        st.caption("🔄 Clique em 'Recarregar Dados' para atualizar")
     with col2:
         st.caption("📊 Dados: Google Sheets")
     with col3:
-        st.caption(f"🕒 Última atualização: {datetime.now().strftime('%H:%M:%S')}")
+        st.caption(f"🕒 Carregado em: {datetime.now().strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
     main()
