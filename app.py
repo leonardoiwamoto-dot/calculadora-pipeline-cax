@@ -84,8 +84,11 @@ def calculate_metrics(df):
     if 'data_prevista_onboarding' in df.columns:
         deals_hoje = len(df[df['data_prevista_onboarding'].dt.date == today])
     
-    # Deals atrasados (mais de 7 dias na etapa)
+    # Calcular dias na etapa (só valores positivos)
     df['dias_na_etapa'] = (datetime.now() - df['data_entrada']).dt.days
+    df['dias_na_etapa'] = df['dias_na_etapa'].clip(lower=0)  # Remover valores negativos
+    
+    # Deals atrasados (mais de 7 dias na etapa)
     deals_atrasados = len(df[df['dias_na_etapa'] > 7])
     
     return {
@@ -128,8 +131,12 @@ def create_timeline_chart(df):
     if df.empty:
         return None
     
+    # Garantir que dias_na_etapa seja positivo
+    df_clean = df.copy()
+    df_clean['dias_na_etapa'] = df_clean['dias_na_etapa'].clip(lower=1)  # Mínimo 1 dia
+    
     fig = px.scatter(
-        df, 
+        df_clean, 
         x='data_entrada', 
         y='etapa',
         color='bdr',
@@ -190,7 +197,7 @@ def main():
     # Botão de atualizar
     if st.sidebar.button("🔄 Atualizar Dados"):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
     
     # Layout principal com tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Dashboard", "📋 Lista de Deals", "⚠️ Deals Atrasados", "📊 Análises"])
